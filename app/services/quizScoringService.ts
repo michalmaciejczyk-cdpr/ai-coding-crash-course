@@ -7,6 +7,7 @@ import {
   quizAttempts,
   quizAnswers,
 } from "~/db/schema";
+import { isPassingScore } from "~/lib/quizzes";
 
 function scoreMultipleChoiceQuestions(quizData: any, answers: any): any {
   let correctCount = 0;
@@ -231,7 +232,7 @@ export function computeResult(
     }
 
     const scoreValue = total > 0 ? correct / total : 0;
-    const passed = scoreValue >= quiz.passingScore;
+    const passed = isPassingScore(scoreValue, quiz.passingScore);
     const grade = calculateGrade(scoreValue);
 
     const attempt = db

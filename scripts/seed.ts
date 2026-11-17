@@ -12,6 +12,7 @@ import {
   QuestionType,
   TeamMemberRole,
 } from "../app/db/schema";
+import { isPassingScore } from "../app/lib/quizzes";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1671,7 +1672,7 @@ You've completed the Building REST APIs course. You now have the skills to build
     const score = correctCount / totalQuestions;
 
     // Passed when the score reaches the quiz's own passing score
-    const passed = score >= quiz.passingScore;
+    const passed = isPassingScore(score, quiz.passingScore);
 
     const [attempt] = db
       .insert(schema.quizAttempts)
