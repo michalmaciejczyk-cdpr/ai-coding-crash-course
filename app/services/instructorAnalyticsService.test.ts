@@ -210,6 +210,21 @@ describe("getInstructorAnalytics", () => {
       expect(result.summary.activeStudents).toBe(0);
     });
 
+    it("ignores completions by someone not enrolled in the course", () => {
+      const lesson = addLesson(base.course.id);
+      recordProgress(
+        base.user.id,
+        lesson.id,
+        schema.LessonProgressStatus.Completed,
+        JUST_INSIDE
+      );
+
+      const result = getInstructorAnalytics(base.instructor.id, NOW);
+
+      expect(result.summary.activeStudents).toBe(0);
+      expect(rowFor(result, base.course.id)?.activeStudents).toBe(0);
+    });
+
     it("counts a student active in two courses once in the summary", () => {
       const second = addCourse(
         base.instructor.id,

@@ -27,7 +27,7 @@ function includedCourses(instructorId: number) {
 }
 
 /**
- * Lesson completions in the instructor's included courses within the 30 days
+ * Enrolled students' lesson completions in the instructor's included courses within the 30 days
  * before `now`. Only completed lessons count — not quiz attempts, video
  * events, or lessons still in progress.
  */
@@ -42,6 +42,15 @@ function recentCompletions(instructorId: number, now: Date) {
     .innerJoin(lessons, eq(lessonProgress.lessonId, lessons.id))
     .innerJoin(modules, eq(lessons.moduleId, modules.id))
     .innerJoin(courses, eq(modules.courseId, courses.id))
+    // Only enrolled students count, so a course never shows more active
+    // students than enrolled ones.
+    .innerJoin(
+      enrollments,
+      and(
+        eq(enrollments.userId, lessonProgress.userId),
+        eq(enrollments.courseId, courses.id)
+      )
+    )
     .where(
       and(
         includedCourses(instructorId),
