@@ -16,6 +16,8 @@ import {
   ArrowUp,
   ArrowUpDown,
   BarChart3,
+  CircleCheck,
+  DollarSign,
   Users,
 } from "lucide-react";
 import { cn } from "~/lib/utils";
@@ -23,7 +25,7 @@ import { cn } from "~/lib/utils";
 export function meta() {
   return [
     { title: "Analytics — Cadence" },
-    { name: "description", content: "Student and activity numbers for your courses" },
+    { name: "description", content: "Students, revenue, completion and quiz numbers for your courses" },
   ];
 }
 
@@ -33,17 +35,60 @@ export async function loader({ request }: Route.LoaderArgs) {
 }
 
 type CourseRow = InstructorAnalytics["courses"][number];
-type SortKey = "title" | "enrolledStudents" | "activeStudents";
+type NumericKey = {
+  [K in keyof CourseRow]: CourseRow[K] extends number | null ? K : never;
+}[keyof CourseRow];
+type SortKey = "title" | NumericKey;
 type SortDirection = "asc" | "desc";
+
+/** Undefined values (null) render as "—", never as 0. */
+const NO_VALUE = "—";
+
+function formatCount(value: number | null) {
+  return value === null ? NO_VALUE : value.toLocaleString("en-US");
+}
+
+function formatUsd(cents: number | null) {
+  return cents === null
+    ? NO_VALUE
+    : (cents / 100).toLocaleString("en-US", {
+        style: "currency",
+        currency: "USD",
+      });
+}
+
+function formatPercent(rate: number | null) {
+  return rate === null ? NO_VALUE : `${Math.round(rate * 100)}%`;
+}
+
+const NUMBER_COLUMNS: {
+  key: NumericKey;
+  label: string;
+  format: (value: number | null) => string;
+}[] = [
+  { key: "enrolledStudents", label: "Enrolled", format: formatCount },
+  { key: "activeStudents", label: "Active", format: formatCount },
+  { key: "purchases", label: "Purchases", format: formatCount },
+  { key: "grossRevenue", label: "Gross revenue", format: formatUsd },
+  { key: "unredeemedSeats", label: "Unredeemed seats", format: formatCount },
+  { key: "completionRate", label: "Completion", format: formatPercent },
+  { key: "averageProgress", label: "Avg progress", format: formatPercent },
+  {
+    key: "averageBestQuizScore",
+    label: "Avg best quiz score",
+    format: formatPercent,
+  },
+  { key: "quizPassRate", label: "Quiz pass rate", format: formatPercent },
+];
 
 function sortRows(rows: CourseRow[], key: SortKey, direction: SortDirection) {
   const sign = direction === "asc" ? 1 : -1;
   return [...rows].sort((a, b) => {
-    const result =
-      key === "title"
-        ? a.title.localeCompare(b.title)
-        : a[key] - b[key];
-    return result * sign;
+    if (key === "title") return a.title.localeCompare(b.title) * sign;
+    const [x, y] = [a[key], b[key]];
+    // Undefined values sit at the bottom in either direction.
+    if (x === null || y === null) return (x === null ? 1 : 0) - (y === null ? 1 : 0);
+    return (x - y) * sign;
   });
 }
 
@@ -71,7 +116,7 @@ function SummaryCard({
   icon,
 }: {
   label: string;
-  value: number;
+  value: string;
   hint: string;
   icon: React.ReactNode;
 }) {
@@ -108,7 +153,10 @@ function SortableHeader({
   const Icon = !active ? ArrowUpDown : direction === "asc" ? ArrowUp : ArrowDown;
   return (
     <th
-      className={cn("px-4 py-3 font-medium", align === "right" && "text-right")}
+      className={cn(
+        "whitespace-nowrap px-4 py-3 font-medium",
+        align === "right" && "text-right"
+      )}
       aria-sort={active ? (direction === "asc" ? "ascending" : "descending") : "none"}
     >
       <button
@@ -130,8 +178,8 @@ export default function InstructorAnalyticsPage({
   loaderData,
 }: Route.ComponentProps) {
   const { summary, courses } = loaderData;
-  const [sortKey, setSortKey] = useState<SortKey>("title");
-  const [direction, setDirection] = useState<SortDirection>("asc");
+  const [sortKey, setSortKey] = useState<SortKey>("grossRevenue");
+  const [direction, setDirection] = useState<SortDirection>("desc");
 
   function handleSort(column: SortKey) {
     if (column === sortKey) {
@@ -162,22 +210,34 @@ export default function InstructorAnalyticsPage({
       <div className="mb-8">
         <h1 className="text-3xl font-bold">Analytics</h1>
         <p className="mt-1 text-muted-foreground">
-          Students and activity across your published and archived courses
+          All-time numbers across your published and archived courses
         </p>
       </div>
 
-      <div className="mb-8 grid gap-6 sm:grid-cols-2">
+      <div className="mb-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
         <SummaryCard
           label="Enrolled students"
-          value={summary.enrolledStudents}
+          value={formatCount(summary.enrolledStudents)}
           hint="Distinct students across all your courses"
           icon={<Users className="size-4 text-muted-foreground" />}
         />
         <SummaryCard
           label="Active students"
-          value={summary.activeStudents}
+          value={formatCount(summary.activeStudents)}
           hint="Completed a lesson in the last 30 days"
           icon={<Activity className="size-4 text-muted-foreground" />}
+        />
+        <SummaryCard
+          label="Gross revenue (USD)"
+          value={formatUsd(summary.grossRevenue)}
+          hint="Amounts paid, after PPP discounts"
+          icon={<DollarSign className="size-4 text-muted-foreground" />}
+        />
+        <SummaryCard
+          label="Completion rate"
+          value={formatPercent(summary.completionRate)}
+          hint="Enrollments that completed every lesson"
+          icon={<CircleCheck className="size-4 text-muted-foreground" />}
         />
       </div>
 
@@ -190,7 +250,7 @@ export default function InstructorAnalyticsPage({
           </p>
         </div>
       ) : (
-        <Card className="overflow-hidden py-0">
+        <Card className="overflow-x-auto py-0">
           <table className="w-full text-sm">
             <thead className="border-b bg-muted/50 text-left text-muted-foreground">
               <tr>
@@ -201,22 +261,17 @@ export default function InstructorAnalyticsPage({
                   direction={direction}
                   onSort={handleSort}
                 />
-                <SortableHeader
-                  label="Enrolled"
-                  column="enrolledStudents"
-                  sortKey={sortKey}
-                  direction={direction}
-                  onSort={handleSort}
-                  align="right"
-                />
-                <SortableHeader
-                  label="Active"
-                  column="activeStudents"
-                  sortKey={sortKey}
-                  direction={direction}
-                  onSort={handleSort}
-                  align="right"
-                />
+                {NUMBER_COLUMNS.map((column) => (
+                  <SortableHeader
+                    key={column.key}
+                    label={column.label}
+                    column={column.key}
+                    sortKey={sortKey}
+                    direction={direction}
+                    onSort={handleSort}
+                    align="right"
+                  />
+                ))}
                 <th className="px-4 py-3">
                   <span className="sr-only">Roster</span>
                 </th>
@@ -231,13 +286,15 @@ export default function InstructorAnalyticsPage({
                       <StatusBadge status={course.status} />
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-right tabular-nums">
-                    {course.enrolledStudents}
-                  </td>
-                  <td className="px-4 py-3 text-right tabular-nums">
-                    {course.activeStudents}
-                  </td>
-                  <td className="px-4 py-3 text-right">
+                  {NUMBER_COLUMNS.map((column) => (
+                    <td
+                      key={column.key}
+                      className="px-4 py-3 text-right tabular-nums"
+                    >
+                      {column.format(course[column.key])}
+                    </td>
+                  ))}
+                  <td className="whitespace-nowrap px-4 py-3 text-right">
                     <Link
                       to={`/instructor/${course.id}/students`}
                       className="font-medium text-primary hover:underline"

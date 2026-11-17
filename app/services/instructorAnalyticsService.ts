@@ -1,23 +1,31 @@
-import { and, countDistinct, eq, gte, inArray, lte } from "drizzle-orm";
-import { db } from "~/db";
 import {
-  CourseStatus,
-  LessonProgressStatus,
-  courses,
-  enrollments,
-  lessonProgress,
-  lessons,
-  modules,
-} from "~/db/schema";
+  and,
+  avg,
+  count,
+  countDistinct,
+  eq,
+  inArray,
+  isNull,
+  max,
+  sql,
+  sum,
+} from "drizzle-orm";
+import { db } from "~/db";
+import { CourseStatus, coupons, courses, purchases } from "~/db/schema";
+import {
+  bestQuizAttempts,
+  studentCourseProgress,
+} from "./studentProgressQueries";
 
 // ─── Instructor Analytics Service ───
 // Aggregate numbers for an instructor's own courses, computed live.
+// Completion, progress and activity come from studentProgressQueries so they
+// match the course roster. Rates are 0–1, or null when they can't be computed.
+// Money is in cents.
 // Uses positional parameters (project convention).
 
 // Drafts have no students yet; archived courses still carry their history.
 const INCLUDED_STATUSES = [CourseStatus.Published, CourseStatus.Archived];
-
-const ACTIVE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 function includedCourses(instructorId: number) {
   return and(
@@ -26,83 +34,131 @@ function includedCourses(instructorId: number) {
   );
 }
 
-/**
- * Enrolled students' lesson completions in the instructor's included courses within the 30 days
- * before `now`. Only completed lessons count — not quiz attempts, video
- * events, or lessons still in progress.
- */
-function recentCompletions(instructorId: number, now: Date) {
-  const windowStart = new Date(now.getTime() - ACTIVE_WINDOW_MS);
-  return db
-    .select({
-      courseId: courses.id,
-      activeStudents: countDistinct(lessonProgress.userId),
-    })
-    .from(lessonProgress)
-    .innerJoin(lessons, eq(lessonProgress.lessonId, lessons.id))
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .innerJoin(courses, eq(modules.courseId, courses.id))
-    // Only enrolled students count, so a course never shows more active
-    // students than enrolled ones.
-    .innerJoin(
-      enrollments,
-      and(
-        eq(enrollments.userId, lessonProgress.userId),
-        eq(enrollments.courseId, courses.id)
-      )
-    )
-    .where(
-      and(
-        includedCourses(instructorId),
-        eq(lessonProgress.status, LessonProgressStatus.Completed),
-        gte(lessonProgress.completedAt, windowStart.toISOString()),
-        lte(lessonProgress.completedAt, now.toISOString())
-      )
-    )
-    .$dynamic();
+function ratio(numerator: number, denominator: number) {
+  return denominator > 0 ? numerator / denominator : null;
+}
+
+function byCourseId<T extends { courseId: number }>(rows: T[]) {
+  return new Map(rows.map((row) => [row.courseId, row]));
 }
 
 export type InstructorAnalytics = ReturnType<typeof getInstructorAnalytics>;
 
 export function getInstructorAnalytics(instructorId: number, now: Date) {
-  const rows = db
-    .select({
-      id: courses.id,
-      title: courses.title,
-      status: courses.status,
-      enrolledStudents: countDistinct(enrollments.userId),
-    })
+  const included = includedCourses(instructorId);
+
+  const courseList = db
+    .select({ id: courses.id, title: courses.title, status: courses.status })
     .from(courses)
-    .leftJoin(enrollments, eq(enrollments.courseId, courses.id))
-    .where(includedCourses(instructorId))
-    .groupBy(courses.id)
+    .where(included)
     .orderBy(courses.title)
     .all();
 
-  const enrolled = db
-    .select({ count: countDistinct(enrollments.userId) })
-    .from(enrollments)
-    .innerJoin(courses, eq(enrollments.courseId, courses.id))
-    .where(includedCourses(instructorId))
-    .get();
+  const progress = studentCourseProgress(included, now);
 
-  const activeByCourse = new Map(
-    recentCompletions(instructorId, now)
-      .groupBy(courses.id)
+  const studentsByCourse = byCourseId(
+    db
+      .select({
+        courseId: progress.courseId,
+        enrolledStudents: count(),
+        activeStudents: sum(progress.isActive).mapWith(Number),
+        completedStudents: sum(progress.isCompleted).mapWith(Number),
+        totalLessons: max(progress.totalLessons).mapWith(Number),
+        averageProgress: avg(progress.progress).mapWith(Number),
+      })
+      .from(progress)
+      .groupBy(progress.courseId)
       .all()
-      .map((row) => [row.courseId, row.activeStudents])
   );
 
-  const active = recentCompletions(instructorId, now).get();
+  // A student in several courses counts once.
+  const distinctStudents = db
+    .select({
+      enrolled: countDistinct(progress.userId),
+      active: countDistinct(
+        sql`case when ${progress.isActive} = 1 then ${progress.userId} end`
+      ),
+    })
+    .from(progress)
+    .get();
+
+  const revenueByCourse = byCourseId(
+    db
+      .select({
+        courseId: purchases.courseId,
+        purchases: count(purchases.id),
+        grossRevenue: sum(purchases.amountPaid).mapWith(Number),
+      })
+      .from(purchases)
+      .innerJoin(courses, eq(purchases.courseId, courses.id))
+      .where(included)
+      .groupBy(purchases.courseId)
+      .all()
+  );
+
+  // Seats bought in a team purchase that nobody has redeemed yet.
+  const unredeemedByCourse = byCourseId(
+    db
+      .select({ courseId: coupons.courseId, seats: count(coupons.id) })
+      .from(coupons)
+      .innerJoin(courses, eq(coupons.courseId, courses.id))
+      .where(and(included, isNull(coupons.redeemedByUserId)))
+      .groupBy(coupons.courseId)
+      .all()
+  );
+
+  // Averaged over attempted (student, quiz) pairs, so a pair with no attempts
+  // never drags the numbers down.
+  const quizResults = bestQuizAttempts(included);
+  const quizzesByCourse = byCourseId(
+    db
+      .select({
+        courseId: quizResults.courseId,
+        averageBestScore: avg(quizResults.bestScore).mapWith(Number),
+        passRate: avg(quizResults.passed).mapWith(Number),
+      })
+      .from(quizResults)
+      .groupBy(quizResults.courseId)
+      .all()
+  );
+
+  const courseRows = courseList.map((course) => {
+    const students = studentsByCourse.get(course.id);
+    const revenue = revenueByCourse.get(course.id);
+    const quiz = quizzesByCourse.get(course.id);
+    const enrolledStudents = students?.enrolledStudents ?? 0;
+    const hasLessons = (students?.totalLessons ?? 0) > 0;
+    return {
+      ...course,
+      enrolledStudents,
+      activeStudents: students?.activeStudents ?? 0,
+      completedStudents: students?.completedStudents ?? 0,
+      completionRate: hasLessons
+        ? ratio(students?.completedStudents ?? 0, enrolledStudents)
+        : null,
+      averageProgress: hasLessons ? (students?.averageProgress ?? null) : null,
+      averageBestQuizScore: quiz?.averageBestScore ?? null,
+      quizPassRate: quiz?.passRate ?? null,
+      purchases: revenue?.purchases ?? 0,
+      grossRevenue: revenue?.grossRevenue ?? 0,
+      unredeemedSeats: unredeemedByCourse.get(course.id)?.seats ?? 0,
+    };
+  });
+
+  const total = (pick: (row: (typeof courseRows)[number]) => number) =>
+    courseRows.reduce((acc, row) => acc + pick(row), 0);
 
   return {
     summary: {
-      enrolledStudents: enrolled?.count ?? 0,
-      activeStudents: active?.activeStudents ?? 0,
+      enrolledStudents: distinctStudents?.enrolled ?? 0,
+      activeStudents: distinctStudents?.active ?? 0,
+      grossRevenue: total((row) => row.grossRevenue),
+      /** Pooled over every enrollment, not an average of course rates. */
+      completionRate: ratio(
+        total((row) => row.completedStudents),
+        total((row) => row.enrolledStudents)
+      ),
     },
-    courses: rows.map((row) => ({
-      ...row,
-      activeStudents: activeByCourse.get(row.id) ?? 0,
-    })),
+    courses: courseRows,
   };
 }
