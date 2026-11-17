@@ -231,7 +231,7 @@ export function computeResult(
     }
 
     const scoreValue = total > 0 ? correct / total : 0;
-    const passed = scoreValue > 0.7;
+    const passed = scoreValue >= quiz.passingScore;
     const grade = calculateGrade(scoreValue);
 
     const attempt = db
